@@ -11,7 +11,8 @@ var express = require('express')
   , db = require('./lib/database')
   , package_metadata = require('./package.json')
   , locale = require('./lib/locale')
-  , request = require('request');
+  , request = require('request')
+  , async = require('async');
 
 var app = express();
 const util = require('util');
@@ -53,30 +54,97 @@ app.use(express.static(path.join(__dirname, 'public')));
 // routes
 app.use('/api/address/:address/utxo', function(req,res){
   console.log("TACA ===> API /api/address/:address/utxo, address = %s", req.params.address)
-  db.get_utxo(req.params.address, function(utxo){
-    var return_info = []
-    lib.syncLoop(utxo.length, function (loop) {
-      // Update balance and transaction of addresses used as vin
-      var i = loop.iteration();
+  vin_mempool = []
+  utxo_mempool = []
+  lib.get_blockcount( function (blockheight) {
+    lib.get_rawmempool(function(txid_mempool) {
+      async.eachLimit(txid_mempool, 1, function(txid, next_tx) {
+        lib.get_rawtransaction(txid, function(tx){
+          lib.prepare_vin(tx, function(vin) { // prepare list of {vin_address, sent_amount}
+            lib.prepare_vout(tx.vout, txid, vin, function(vout, nvin) { // prepare list of {vout_address, received_amount}
+              for (var i = 0; i < nvin.length; i++) {
+                console.log("TACA app.js, utxo ===> update vin[%s/%s], address = %s, amount = %s, prevTxid = %s", i+1, vin.length, nvin[i].addresses, nvin[i].amount, nvin[i].txid);
+                if (req.params.address === nvin[i].addresses)
+                {
+                  info = {
+                    txid: nvin[i].prevTxid,
+                    vout: nvin[i].prevVout,
+                    value: nvin[i].amount,
+                    status: {
+                      confirmed: false,
+                      block_height: blockheight
+                    }
+                  }
+                  vin_mempool.push(info);
+                }
+              }
 
-      console.log("TACA ===> API /api/address/:address/utxo, utxo[%s].txid = %s", i, utxo[i].txid)
-      db.get_tx(utxo[i].txid, function(tx){
-        info = {
-          txid: utxo[i].txid,
-          vout: utxo[i].vout,
-          value: utxo[i].amount,
-          status: {
-            confirmed: true,
-            block_height: tx.blockindex,
-            block_hash: tx.blockhash,
-            block_time: tx.timestamp,
-          }
-        }
-        return_info.push(info);
-        loop.next();
+              for (var t = 0; t < vout.length; t++) {
+                if (req.params.address === vout[t].addresses) {
+                  // Update balance and transaction of addresses in vout
+                  console.log("TACA app.js, utxo ===> update vout[%s/%s], address = %s, amount = %s", t+1, vout.length, vout[t].addresses, vout[t].amount);
+                  info = {
+                    txid: txid,
+                    vout: t,
+                    value: vout[t].amount,
+                    status: {
+                      confirmed: false,
+                      block_height: blockheight
+                    }
+                  }
+                  utxo_mempool.push(info);
+                }
+              }
+
+              next_tx()
+            })
+          })
+        })
+      },function(){
+        db.get_utxo(req.params.address, function(utxo){
+          var return_info = []
+          lib.syncLoop(utxo.length, function (loop) {
+            // Update balance and transaction of addresses used as vin
+            var i = loop.iteration();
+
+            console.log("TACA ===> API /api/address/:address/utxo, utxo[%s].txid = %s", i, utxo[i].txid)
+            db.get_tx(utxo[i].txid, function(tx){
+              var isInMempool = vin_mempool.some(function(vin){
+                if (vin.txid === utxo[i].txid && vin.vout === utxo[i].vout) {
+                  return true
+                }
+              })
+              if (!isInMempool) {
+                info = {
+                  txid: utxo[i].txid,
+                  vout: utxo[i].vout,
+                  value: utxo[i].amount,
+                  status: {
+                    confirmed: true,
+                    block_height: tx.blockindex,
+                    block_hash: tx.blockhash,
+                    block_time: tx.timestamp,
+                  }
+                }
+                return_info.push(info);
+              }
+              loop.next();
+            })
+          }, function() {
+            for(var i = 0; i < utxo_mempool.length; i++) {
+              var isInMempool = vin_mempool.some(function(vin){
+                if (vin.txid === utxo_mempool[i].txid && vin.vout === utxo_mempool[i].vout) {
+                  return true
+                }
+              })
+              if (!isInMempool) {
+                return_info.push(utxo_mempool[i]);
+              }
+            }
+            res.send(return_info);
+          })
+        })
       })
-    }, function() {
-      res.send(return_info);
     })
   })
 });
