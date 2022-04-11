@@ -152,15 +152,55 @@ app.use('/api/address/:address/utxo', function(req,res){
 app.use('/api/address/:address', function(req,res){
   console.log("TACA ===> API /api/address/:address, address = %s", req.params.address)
   db.get_utxo_info(req.params.address, function(utxo_info){
-    console.log("TACA ===> API /api/address/:address, utxo_info = %s", util.inspect(utxo_info, true, null, true))
+    console.log("TACA ===> API /api/address/:address, address = %s, utxo_info in blockchain = %s", req.params.address, util.inspect(utxo_info, true, null, true))
     db.get_txcount(req.params.address, function(txcount) {
-      console.log("TACA ===> API /api/address/:address, txcount = %s", util.inspect(txcount, true, null, true))
-      return_info = {
-        address: req.params.address,
-        ...utxo_info,
-        tx_count: txcount
-      }
-      res.send(return_info);
+      console.log("TACA ===> API /api/address/:address, address = %s, txcount in blockchain = %s", req.params.address, util.inspect(txcount, true, null, true))
+
+      lib.get_rawmempool(function(txid_mempool) {
+        async.eachLimit(txid_mempool, 1, function(txid, next_tx) {
+          lib.get_rawtransaction(txid, function(tx){
+            lib.prepare_vin(tx, function(vin) { // prepare list of {vin_address, sent_amount}
+              lib.prepare_vout(tx.vout, txid, vin, function(vout, nvin) { // prepare list of {vout_address, received_amount}
+                var isRelateToReqAddress = false
+                for (var i = 0; i < nvin.length; i++) {
+                  console.log("TACA ===> API /api/address/:address, update vin[%s/%s], address = %s, amount = %s, prevTxid = %s", i+1, vin.length, nvin[i].addresses, nvin[i].amount, nvin[i].txid);
+                  if (req.params.address === nvin[i].addresses)
+                  {
+                    // Update balance and utxo of address in vin
+                    utxo_info.spent_txo_count++
+                    utxo_info.spent_txo_sum += nvin[i].amount
+                    isRelateToReqAddress = true
+                  }
+                }
+
+                for (var t = 0; t < vout.length; t++) {
+                  if (req.params.address === vout[t].addresses) {
+                    // Update balance and utxo of address in vout
+                    console.log("TACA ===> API /api/address/:address, update vout[%s/%s], address = %s, amount = %s", t+1, vout.length, vout[t].addresses, vout[t].amount);
+                    utxo_info.funded_txo_count++
+                    utxo_info.funded_txo_sum += vout[t].amount
+                    isRelateToReqAddress = true
+                  }
+                }
+  
+                if (isRelateToReqAddress) {
+                  txcount++
+                }
+                next_tx()
+              })
+            })
+          })
+        },function(){
+          console.log("TACA ===> API /api/address/:address, address = %s, utxo_info in blockchain + mempool = %s", req.params.address, util.inspect(utxo_info, true, null, true))
+          console.log("TACA ===> API /api/address/:address, address = %s, txcount in blockchain + mempool = %s", req.params.address, util.inspect(txcount, true, null, true))
+          return_info = {
+            address: req.params.address,
+            ...utxo_info,
+            tx_count: txcount
+          }
+          res.send(return_info);
+        })
+      })
     })
   })
 });
